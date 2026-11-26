@@ -13,7 +13,7 @@ app.use("/api", rateLimit({ windowMs: 60000, limit: 20 }));
 
 function auth(req, res, next) {
   const expected = String(process.env.API_KEY || "");
-  const supplied = String(req.headers["x-api-key"] || "");
+  const supplied = String(req.headers["x-api-key"] || req.query.key || "");
   if (!expected || !supplied) return res.status(401).json({ success: false, error: "API key required" });
   const a = Buffer.from(supplied);
   const b = Buffer.from(expected);
@@ -29,12 +29,11 @@ app.get("/api/status", (_req, res) => res.json({
   model_configured: Boolean(process.env.GEMINI_API_KEY)
 }));
 
-app.post("/api/chat", auth, async (req, res) => {
+async function generateAnswer(message, res) {
   try {
     const key = process.env.GEMINI_API_KEY;
     if (!key) return res.status(503).json({ success: false, error: "Gemini API key is not configured on the server" });
 
-    const message = req.body?.message;
     if (typeof message !== "string" || !message.trim() || message.length > 10000) {
       return res.status(400).json({ success: false, error: "Send a message (max 10000 characters)." });
     }
@@ -58,11 +57,16 @@ app.post("/api/chat", auth, async (req, res) => {
 
     const answer = data?.candidates?.[0]?.content?.parts
       ?.map(part => part.text || "").join("") || "No response was returned.";
-    res.json({ success: true, bot: "NAIM AI", model, response: answer });
+    return res.json({ success: true, bot: "NAIM AI", model, response: answer });
   } catch (err) {
     console.error("AI request failed:", err.message);
-    res.status(500).json({ success: false, error: "AI request failed. Check server configuration." });
+    return res.status(500).json({ success: false, error: "AI request failed. Check server configuration." });
   }
-});
+}
+
+app.post("/api/chat", auth, (req, res) => generateAnswer(req.body?.message, res));
+
+// Browser-friendly GET format: /api/chat?message=Hello&key=YOUR_API_KEY
+app.get("/api/chat", auth, (req, res) => generateAnswer(req.query.message, res));
 
 export default app;
