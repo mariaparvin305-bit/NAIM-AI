@@ -1,7 +1,6 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import OpenAI from "openai";
 import rateLimit from "express-rate-limit";
 import crypto from "node:crypto";
 
@@ -15,9 +14,7 @@ app.use("/api", rateLimit({ windowMs: 60000, limit: 20 }));
 function auth(req, res, next) {
   const expected = String(process.env.API_KEY || "");
   const supplied = String(req.headers["x-api-key"] || "");
-  if (!expected || !supplied) {
-    return res.status(401).json({ success: false, error: "API key required" });
-  }
+  if (!expected || !supplied) return res.status(401).json({ success: false, error: "API key required" });
   const a = Buffer.from(supplied);
   const b = Buffer.from(expected);
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
@@ -27,24 +24,41 @@ function auth(req, res, next) {
 }
 
 app.get("/", (_req, res) => res.json({ name: "NAIM AI API", status: "online" }));
-app.get("/api/status", (_req, res) => res.json({ success: true, status: "online" }));
+app.get("/api/status", (_req, res) => res.json({
+  success: true, status: "online",
+  model_configured: Boolean(process.env.GEMINI_API_KEY)
+}));
 
 app.post("/api/chat", auth, async (req, res) => {
   try {
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ success: false, error: "Server OpenAI key is not configured" });
-    }
+    const key = process.env.GEMINI_API_KEY;
+    if (!key) return res.status(503).json({ success: false, error: "Gemini API key is not configured on the server" });
+
     const message = req.body?.message;
     if (typeof message !== "string" || !message.trim() || message.length > 10000) {
       return res.status(400).json({ success: false, error: "Send a message (max 10000 characters)." });
     }
-    const ai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const response = await ai.responses.create({
-      model: process.env.OPENAI_MODEL || "gpt-4.1",
-      instructions: "You are NAIM AI, a helpful assistant. Support Bengali and English.",
-      input: message.trim()
+
+    const model = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    const upstream = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: "You are NAIM AI, a helpful assistant. Support Bengali and English." }] },
+        contents: [{ role: "user", parts: [{ text: message.trim() }] }]
+      })
     });
-    res.json({ success: true, bot: "NAIM AI", response: response.output_text, response_id: response.id });
+
+    const data = await upstream.json();
+    if (!upstream.ok) {
+      console.error("Gemini API error:", data?.error?.message || upstream.status);
+      return res.status(502).json({ success: false, error: "AI provider request failed" });
+    }
+
+    const answer = data?.candidates?.[0]?.content?.parts
+      ?.map(part => part.text || "").join("") || "No response was returned.";
+    res.json({ success: true, bot: "NAIM AI", model, response: answer });
   } catch (err) {
     console.error("AI request failed:", err.message);
     res.status(500).json({ success: false, error: "AI request failed. Check server configuration." });
